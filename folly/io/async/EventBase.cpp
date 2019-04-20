@@ -725,19 +725,25 @@ void EventBase::detachTimeoutManager(AsyncTimeout* obj) {
   ev->ev_base = nullptr;
 }
 
+// 将AsyncTimeout中的struct event添加到event_base中
+// 并设置超时时间timeout
 bool EventBase::scheduleTimeout(
     AsyncTimeout* obj,
     TimeoutManager::timeout_type timeout) {
   dcheckIsInEventBaseThread();
   // Set up the timeval and add the event
+
+  // 创建timeval对象，传入timeout
   struct timeval tv;
   tv.tv_sec = long(timeout.count() / 1000LL);
   tv.tv_usec = long((timeout.count() % 1000LL) * 1000LL);
 
+  // 获取AsyncTimeout中的struct event
   struct event* ev = obj->getEvent();
 
   DCHECK(ev->ev_base);
 
+  // 将event添加到事件循环中，并设置超时时间
   if (event_add(ev, &tv) < 0) {
     LOG(ERROR) << "EventBase: failed to schedule timeout: " << errnoStr(errno);
     return false;

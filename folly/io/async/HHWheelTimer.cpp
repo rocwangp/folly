@@ -115,29 +115,56 @@ HHWheelTimerBase<Duration>::~HHWheelTimerBase() {
   cancelAll();
 }
 
+// 将定时任务添加到时间轮中
+// dueTick: 定时任务超时的时间轮刻度数
+// nextTickToProcess: 下一个要到达的时间轮刻度
+// nextTick: 当前时刻对应的时间轮刻度数
+
+// 时间轮的刻度盘从某一时刻开始运转，这个开始时间作为所有超时任务时间的参考系
+// 所以任何一个超时时间就都可以在刻度盘上找到对应的位置
 template <class Duration>
 void HHWheelTimerBase<Duration>::scheduleTimeoutImpl(
     Callback* callback,
     int64_t dueTick,
     int64_t nextTickToProcess,
     int64_t nextTick) {
+
+  // 当前时刻到定时器超时的相对刻度数
   int64_t diff = dueTick - nextTickToProcess;
   CallbackList* list;
 
   auto bi = makeBitIterator(bitmap_.begin());
 
+  // 每个刻度盘表示一定范围的刻度数
+  // buckets_[0]: 1 ~ (1 << 8)
+  // buckets_[1]: (1 << 8) ~ (1 << 16) => (1 ~ (1 << 8)) << 8
+  // buckets_[2]: (1 << 16) ~ (1 << 24) => (1 ~ (1 << 8)) << 8 << 8
+  // buckets_[0]每移动一圈，buckets_[1]移动一个刻度
+  // buckets_[1]每移动一圈，buckets_[2]移动一个刻度
+
+  // 对于某个定时任务的绝对时间，可以在时间轮刻度盘上找到
+  // 一组<buckets_[2][a], buckets_[1][b], buckets_[0][c]>
+  // 先将它放到a上面，刻度到达时放到b上面，刻度到达时放到c上面，之后若刻度到达则代表超时
   if (diff < 0) {
     list = &buckets_[0][nextTick & WHEEL_MASK];
     *(bi + (nextTick & WHEEL_MASK)) = true;
     callback->bucket_ = nextTick & WHEEL_MASK;
+  // 距离超时的刻度数小于buckets_[0]一圈，那直接添加到buckets_[0]即可
+  // 等到下次移动到对应刻度位置，就可以认为超时
+  // dueTick为超时任务的绝对刻度数，映射到第一维度即可
   } else if (diff < WHEEL_SIZE) {
     list = &buckets_[0][dueTick & WHEEL_MASK];
     *(bi + (dueTick & WHEEL_MASK)) = true;
     callback->bucket_ = dueTick & WHEEL_MASK;
+  // 距离超时的刻度数大于buckets_[0]一圈，但是小于buckets_[1]一圈
+  // 添加到buckets_[1]上，将任务投影到buckets_[1]
+  // 等到指针指向对应刻度，再将其映射到buckets_[0]上
   } else if (diff < 1 << (2 * WHEEL_BITS)) {
     list = &buckets_[1][(dueTick >> WHEEL_BITS) & WHEEL_MASK];
+  // 同理，先映射到buckets_[2]上，再映射到buckets_[1]，最后映射到buckets_[0]
   } else if (diff < 1 << (3 * WHEEL_BITS)) {
     list = &buckets_[2][(dueTick >> 2 * WHEEL_BITS) & WHEEL_MASK];
+  // 同理，先映射到buckets_[3]上，再映射到buckets_[2]，之后映射到buckets_[1], 最后映射到buckets_[0]
   } else {
     /* in largest slot */
     if (diff > LARGEST_SLOT) {
@@ -146,9 +173,13 @@ void HHWheelTimerBase<Duration>::scheduleTimeoutImpl(
     }
     list = &buckets_[3][(dueTick >> 3 * WHEEL_BITS) & WHEEL_MASK];
   }
+
+  // 每个buckets_[a][b]是一个链表，表示对应超时任务
+  // 上述步骤找到对应的链表，将超时任务添加进去
   list->push_back(*callback);
 }
 
+// 添加一个定时任务到时间轮
 template <class Duration>
 void HHWheelTimerBase<Duration>::scheduleTimeout(
     Callback* callback,
@@ -159,10 +190,16 @@ void HHWheelTimerBase<Duration>::scheduleTimeout(
   callback->cancelTimeout();
   callback->requestContext_ = RequestContext::saveContext();
 
+  // 定时任务数
   count_++;
 
-  auto now = getCurTime();
+  // 当前时间
+  auto now = getCurTime(); 
+
+  // 将当前时间表示为时间轮上的刻度
   auto nextTick = calcNextTick(now);
+
+  // 为回调函数设置超时时间
   callback->setScheduled(this, now + timeout);
 
   // There are three possible scenarios:
@@ -173,12 +210,20 @@ void HHWheelTimerBase<Duration>::scheduleTimeout(
   //     we need to use its scheduled tick as a base.
   //   - none of the above are true. In this case, it's safe to use the nextTick
   //     as a base.
+
+  // 当前时刻对应的时间轮刻度
   int64_t baseTick = nextTick;
   if (processingCallbacksGuard_ || isScheduled()) {
     baseTick = std::min(expireTick_, nextTick);
   }
+
+  // 距离超时还需要走多少个时间轮刻度
   int64_t ticks = timeToWheelTicks(timeout);
+
+  // 定时任务超时对应的绝对刻度数
   int64_t due = ticks + nextTick;
+
+  // 将定时任务添加到时间轮中
   scheduleTimeoutImpl(callback, due, baseTick, nextTick);
 
   /* If we're calling callbacks, timer will be reset after all
@@ -230,8 +275,13 @@ void HHWheelTimerBase<Duration>::scheduleTimeoutInternal(Duration timeout) {
   this->AsyncTimeout::scheduleTimeout(timeout);
 }
 
+// 移动时间轮刻度盘，将超时任务取出
+// 先移动buckets_[0]，如果完成一轮，则转动buckets_[1]，如果完成一轮，转到buckets_[2]...
+// 每转动一个高层buckets_，就将任务取出减去对应的刻度数，放到底层的buckets_中
 template <class Duration>
 void HHWheelTimerBase<Duration>::timeoutExpired() noexcept {
+
+  // 计算当前时刻对应的时间轮刻度
   auto nextTick = calcNextTick();
 
   // If the last smart pointer for "this" is reset inside the callback's

@@ -489,6 +489,8 @@ class Core final {
  private:
   Core() : state_(State::Start), attached_(2) {}
 
+	// 创建一个有值的Core, 状态OnlyResult表示有值
+	// 此时在setCallBack时可以直接调用回调函数
   explicit Core(Try<T>&& t)
       : result_(std::move(t)), state_(State::OnlyResult), attached_(1) {}
 

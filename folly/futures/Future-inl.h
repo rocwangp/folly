@@ -446,12 +446,16 @@ FutureBase<T>::withinImplementation(Duration dur, E e, Timekeeper* tk) && {
 
   auto ctx = std::make_shared<Context>(std::move(e));
 
+  // 当f调用完成时，Future::Core::Callback被删除
+  // 会导致ctx析构，引用计数变为0，其它所有的weak_ptr失效
   auto f = [ctx](Try<T>&& t) {
     if (!ctx->token.exchange(true, std::memory_order_relaxed)) {
       ctx->promise.setTry(std::move(t));
     }
   };
   using R = futures::detail::callableResult<T, decltype(f)>;
+
+  // thenImplementation会创建一个新的Future，这个Future保存f函数的执行结果
   ctx->thisFuture = this->thenImplementation(std::move(f), R{});
 
   // Properly propagate interrupt values through futures chained after within()
@@ -462,8 +466,24 @@ FutureBase<T>::withinImplementation(Duration dur, E e, Timekeeper* tk) && {
         }
       });
 
+  // 					Future-Cur			Future-Timer
+  //    					|					|
+  //    					|					|
+  // Future-New		 	(setTry: value)	  (setException: error)
+  //     | 					|					|
+  //     |					|					|
+  // Future-thenError	(setTry: value)	   (setTry: onTimeout func result)
+  //     |
+  // Future-Next		
+
+
   // Have time keeper use a weak ptr to hold ctx,
   // so that ctx can be deallocated as soon as the future job finished.
+
+  // TimerKeeper::after返回一个空Future，这个Future在dur时间后被setValue
+  // 导致thenTry被执行，此时weakCtx有两种状态
+  // 1: expired: 说明ctx(shared_ptr)被析构，说明Future在超时前完成，忽略onTimeout函数
+  // 2: not expired: 说明ctx没有被析构，说明Future没有在超时前完成，调用超时函数onTimeout
   tk->after(dur).thenTry([weakCtx = to_weak_ptr(ctx)](Try<Unit>&& t) mutable {
     auto lockedCtx = weakCtx.lock();
     if (!lockedCtx) {
@@ -1212,6 +1232,10 @@ Future<T>::thenError(tag_t<ExceptionType>, F&& func) && {
   this->setCallback_([state = futures::detail::makeCoreCallbackState(
                           std::move(p), std::forward<F>(func))](
                          Try<T>&& t) mutable {
+
+	// onError的调用链判断是否发生异常
+	// 如果有则执行onError回掉函数
+	// 如果没有则将结果直接保存，继续调用链的执行
     if (auto ex = t.template tryGetExceptionObject<
                   std::remove_reference_t<ExceptionType>>()) {
       state.setTry(makeTryWith([&] { return state.invoke(std::move(*ex)); }));
@@ -1341,9 +1365,27 @@ Future<T> Future<T>::ensure(F&& func) && {
       });
 }
 
+//					  Future-Cur		  Future-Timer
+//						  | 				  |
+//						  | 				  |
+// Future-New		  (setTry: value)	(setException: error)
+//	   |				  | 				  |
+//	   |				  | 				  |
+// Future-thenError   (setTry: value)	 (setTry: onTimeout func result)
+//	   |
+// Future-Next	  
 template <class T>
 template <class F>
 Future<T> Future<T>::onTimeout(Duration dur, F&& func, Timekeeper* tk) && {
+ // within会返回一个新创建的Future-New，这个Future-New直接调用setTry透传当前Future的返回结果
+ // 同时Timekeeper会创建一个Future用于超时任务，这个Future在dur时间后会被setValue(激活)，执行预设的回掉函数
+ // 1. 检查Future是否已经在超时前完成，如果是则忽略直接返回(通过shared_ptr和weak_ptr生命期控制)
+ // 2. 如果超时，则Future-New调用setException产生一个异常对象，激活Future-New
+
+ // thenError会创建一个新的Future-Error，这个Future-Error接受Future-New的返回值
+ // 通过判断Future-New的返回值来得知是否发生超时(正常流程直接透传，无异常，超时会返回异常对象)
+ // 1. 如果没有异常，将Future-New的结果作为Future-Error的结果
+ // 2. 如果由异常，调用onTimeout回掉函数，处理超时错误，将回调函数的返回值作为Future-Error的结果
   return std::move(*this).within(dur, tk).thenError(
       tag_t<FutureTimeout>{},
       [funcw = std::forward<F>(func)](auto const&) mutable {
@@ -1453,6 +1495,7 @@ typename std::enable_if<std::is_base_of<std::exception, E>::value, Future<T>>::
   return makeFuture(Try<T>(make_exception_wrapper<E>(e)));
 }
 
+// 创建一个有值的Future, Core::state是OnlyResult
 template <class T>
 Future<T> makeFuture(Try<T> t) {
   return Future<T>(Future<T>::Core::make(std::move(t)));
