@@ -163,6 +163,8 @@ class exception_wrapper final {
  private:
   struct FOLLY_EXPORT AnyException : std::exception {
     std::type_info const* typeinfo_;
+	// typeid返回的是一个左值，指代一个具有静态存储期(static)的对象
+	// 所以这里可以用指针保存typeid返回值的地址
     template <class T>
     /* implicit */ AnyException(T&& t) noexcept : typeinfo_(&typeid(t)) {}
   };

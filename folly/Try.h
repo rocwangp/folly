@@ -47,15 +47,19 @@ class FOLLY_EXPORT UsingUninitializedTry : public TryException {
  *
  * To represent success or a captured exception, use Try<Unit>.
  */
+
+
+// 对值/异常的包装，用于Future调用链的返回值/参数传递
 template <class T>
 class Try {
+  // 不能包装一个引用
   static_assert(
       !std::is_reference<T>::value,
       "Try may not be used with reference types");
 
   enum class Contains {
-    VALUE,
-    EXCEPTION,
+    VALUE,			// Try中含值
+    EXCEPTION,		// Try中含异常
     NOTHING,
   };
 
@@ -68,6 +72,8 @@ class Try {
   /*
    * Construct an empty Try
    */
+
+  // 默认为空
   Try() noexcept : contains_(Contains::NOTHING) {}
 
   /*
@@ -75,6 +81,10 @@ class Try {
    *
    * @param v The value to copy in
    */
+
+  // 用一个值初始化Try，将v拷贝构造给value_
+  // 如果T的拷贝构造函数不抛出异常，则Try(const T&)也抛出异常
+  // noexcept(bool) true表示定义该函数不抛异常
   explicit Try(const T& v) noexcept(
       std::is_nothrow_copy_constructible<T>::value)
       : contains_(Contains::VALUE), value_(v) {}
@@ -84,9 +94,12 @@ class Try {
    *
    * @param v The value to move in
    */
+
+  // 同理，移动构造函数不抛异常时该函数也不抛异常
   explicit Try(T&& v) noexcept(std::is_nothrow_move_constructible<T>::value)
       : contains_(Contains::VALUE), value_(std::move(v)) {}
 
+  // 原地构造value_，构造函数不抛异常时该函数不抛异常
   template <typename... Args>
   explicit Try(in_place_t, Args&&... args) noexcept(
       std::is_nothrow_constructible<T, Args&&...>::value)
@@ -103,21 +116,32 @@ class Try {
    *
    * @param e The exception_wrapper
    */
+
+  // 根据异常构造Try
   explicit Try(exception_wrapper e) noexcept
       : contains_(Contains::EXCEPTION), e_(std::move(e)) {}
 
   // Move constructor
+  // 移动构造函数
   Try(Try<T>&& t) noexcept(std::is_nothrow_move_constructible<T>::value);
+	  
   // Move assigner
+  // 移动赋值
   Try& operator=(Try<T>&& t) noexcept(
       std::is_nothrow_move_constructible<T>::value);
 
   // Copy constructor
+  // 拷贝构造
   Try(const Try& t) noexcept(std::is_nothrow_copy_constructible<T>::value);
+  
   // Copy assigner
+  // 拷贝赋值
   Try& operator=(const Try& t) noexcept(
       std::is_nothrow_copy_constructible<T>::value);
 
+  // 析构
+  // 析构函数需要显式调用unconstrained union的析构函数
+  // 根据contains_(VALUE/EXCEPTION)来选择调用哪个对象的析构函数
   ~Try();
 
   /*
@@ -128,6 +152,9 @@ class Try {
    *
    * @returns reference to the newly constructed value.
    */
+
+
+  // 原地构造对象
   template <typename... Args>
   T& emplace(Args&&... args) noexcept(
       std::is_nothrow_constructible<T, Args&&...>::value);
@@ -144,6 +171,8 @@ class Try {
    *
    * @returns reference to the newly constructed exception_wrapper.
    */
+
+  // 原地构造异常
   template <typename... Args>
   exception_wrapper& emplaceException(Args&&... args) noexcept(
       std::is_nothrow_constructible<exception_wrapper, Args&&...>::value);
@@ -154,6 +183,8 @@ class Try {
    *
    * @returns mutable reference to the contained value
    */
+
+  // 返回保存的值，this为左值时调用
   T& value() &;
   /*
    * Get a rvalue reference to the contained value. If the Try contains an
@@ -161,6 +192,8 @@ class Try {
    *
    * @returns rvalue reference to the contained value
    */
+
+  // 返回保存的值，this为右值时调用
   T&& value() &&;
   /*
    * Get a const reference to the contained value. If the Try contains an
@@ -168,6 +201,8 @@ class Try {
    *
    * @returns const reference to the contained value
    */
+
+  // 常量左值时调用
   const T& value() const&;
   /*
    * Get a const rvalue reference to the contained value. If the Try contains an
@@ -175,6 +210,8 @@ class Try {
    *
    * @returns const rvalue reference to the contained value
    */
+
+  // 常量右值时调用
   const T&& value() const&&;
 
   /*
@@ -239,12 +276,16 @@ class Try {
   /*
    * @returns True if the Try contains a value, false otherwise
    */
+
+  // 判断是否有值
   bool hasValue() const {
     return contains_ == Contains::VALUE;
   }
   /*
    * @returns True if the Try contains an exception, false otherwise
    */
+
+  // 判断是否有异常
   bool hasException() const {
     return contains_ == Contains::EXCEPTION;
   }
@@ -252,6 +293,8 @@ class Try {
   /*
    * @returns True if the Try contains an exception of type Ex, false otherwise
    */
+
+  // 判断是否有Ex类型的异常
   template <class Ex>
   bool hasException() const {
     return hasException() && e_.is_compatible_with<Ex>();

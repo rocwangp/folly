@@ -303,18 +303,24 @@ decltype(auto) tryInvoke(R, State& state, Try<T>& t) {
 
 // Variant: returns a value
 // e.g. f.then([](Try<T>&& t){ return t.value(); });
+
+// Future::then的回调函数返回的是一个value而不是Future
 template <class T>
 template <typename F, typename R>
 typename std::enable_if<!R::ReturnsFuture::value, typename R::Return>::type
 FutureBase<T>::thenImplementation(F&& func, R) {
   static_assert(
       R::Arg::ArgsSize::value <= 1, "Then must take zero/one argument");
+
+  // 获取返回的Future的模板参数，实际就是回调函数返回值类型
   typedef typename R::ReturnsFuture::Inner B;
 
   Promise<B> p;
   p.core_->setInterruptHandlerNoLock(this->getCore().getInterruptHandler());
 
   // grab the Future now before we lose our handle on the Promise
+
+  // 创建Future-New作为返回值和调用链的下一个Future
   auto sf = p.getSemiFuture();
   sf.setExecutor(this->getExecutor());
   auto f = Future<B>(sf.core_);
@@ -349,17 +355,24 @@ FutureBase<T>::thenImplementation(F&& func, R) {
      in some circumstances, but I think it should be explicit not implicit
      in the destruction of the Future used to create it.
      */
+
+  // Future-Cur会将自己保存的result传入Callback
+  // Callback中会用result调用then的回调函数，将结果保存在Future-New中
   this->setCallback_(
       [state = futures::detail::makeCoreCallbackState(
            std::move(p), std::forward<F>(func))](Try<T>&& t) mutable {
         if (!R::Arg::isTry() && t.hasException()) {
           state.setException(std::move(t.exception()));
         } else {
+        // state.setTry会调用Promise.Core::setResult，将结果保存
+        // 如果在这之前Core已经被setCallback则直接调用，实现调用链效果
           state.setTry(makeTryWith([&] {
             return detail_msvc_15_7_workaround::invoke(R{}, state, t);
           }));
         }
       });
+
+  // 返回Future-New
   return f;
 }
 
@@ -380,12 +393,16 @@ Future<T> chainExecutor(Executor* e, SemiFuture<T>&& f) {
 
 // Variant: returns a Future
 // e.g. f.then([](T&& t){ return makeFuture<T>(t); });
+
+// 返回的是一个Future而不是value
 template <class T>
 template <typename F, typename R>
 typename std::enable_if<R::ReturnsFuture::value, typename R::Return>::type
 FutureBase<T>::thenImplementation(F&& func, R) {
   static_assert(
       R::Arg::ArgsSize::value <= 1, "Then must take zero/one argument");
+
+  // 获取返回的Future中的value类型(模板参数)
   typedef typename R::ReturnsFuture::Inner B;
 
   Promise<B> p;
@@ -398,6 +415,8 @@ FutureBase<T>::thenImplementation(F&& func, R) {
   auto f = Future<B>(sf.core_);
   sf.core_ = nullptr;
 
+
+  // Future-Cur用自己的result调用这个Callback
   this->setCallback_(
       [state = futures::detail::makeCoreCallbackState(
            std::move(p), std::forward<F>(func))](Try<T>&& t) mutable {
@@ -406,10 +425,14 @@ FutureBase<T>::thenImplementation(F&& func, R) {
         } else {
           // Ensure that if function returned a SemiFuture we correctly chain
           // potential deferral.
+
+		  // 此时返回的是个Future<>
           auto tf2 = detail_msvc_15_7_workaround::tryInvoke(R{}, state, t);
           if (tf2.hasException()) {
             state.setException(std::move(tf2.exception()));
           } else {
+          // Future-New::Core保存了外界设置的调用链
+          // 这里需要设置Core的代理，用于更新Core的行为
             auto statePromise = state.stealPromise();
             auto tf3 = chainExecutor(
                 statePromise.core_->getExecutor(), *std::move(tf2));
@@ -419,6 +442,7 @@ FutureBase<T>::thenImplementation(F&& func, R) {
         }
       });
 
+  // 返回Future-New
   return f;
 }
 
@@ -1149,16 +1173,22 @@ Future<T>::thenExTry(F&& func) && {
   return this->thenImplementation(std::move(lambdaFunc), R{});
 }
 
+// 接收一个value而不是Try<>
 template <class T>
 template <typename F>
+// 获取F函数的返回值类型
 Future<typename futures::detail::valueCallableResult<T, F>::value_type>
 Future<T>::thenValue(F&& func) && {
   auto lambdaFunc = [f = std::forward<F>(func)](folly::Try<T>&& t) mutable {
+  	// 调用链传递的参数都是Try<>
+  	// 如果当前回调接收非Try<>而是value，则将其解出来
     return std::forward<F>(f)(
         t.template get<
             false,
             typename futures::detail::valueCallableResult<T, F>::FirstArg>());
   };
+
+  // 调用链的所有函数都被包装成Result(Try<T>&&)类型的lambda
   using R = futures::detail::tryCallableResult<T, decltype(lambdaFunc)>;
   return this->thenImplementation(std::move(lambdaFunc), R{});
 }

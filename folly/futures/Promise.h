@@ -148,6 +148,8 @@ class Promise {
   ///
   /// - `RESULT.valid() == false`
   /// - `RESULT.isFulfilled() == true`
+
+  // 构造一个空的Promise，Core也是空的
   static Promise<T> makeEmpty() noexcept;
 
   /// Constructs a valid but unfulfilled promise.
@@ -156,6 +158,8 @@ class Promise {
   ///
   /// - `valid() == true` (it will have a shared state)
   /// - `isFulfilled() == false` (its shared state won't have a result)
+
+  // 创建一个Promsie，通过Core::make创建一个新的Core
   Promise();
 
   /// Postconditions:

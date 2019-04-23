@@ -41,11 +41,11 @@ namespace detail {
 
 /// See `Core` for details
 enum class State : uint8_t {
-  Start = 1 << 0,
-  OnlyResult = 1 << 1,
-  OnlyCallback = 1 << 2,
-  Proxy = 1 << 3,
-  Done = 1 << 4,
+  Start = 1 << 0,			// Core 初始化时的状态
+  OnlyResult = 1 << 1,		// Core 设置了Result，但是没有设置Callback时的状态
+  OnlyCallback = 1 << 2,	// Core 设置了Callback，但是没有设置Result时的状态
+  Proxy = 1 << 3,			// Core 设置了Proxy时的状态
+  Done = 1 << 4,			// Core 以Result调用了Callback后的状态
   Empty = 1 << 5,
 };
 constexpr State operator&(State a, State b) {
@@ -191,23 +191,34 @@ static_assert(sizeof(SpinLock) == 1, "missized");
 ///   principle is the same.
 /// - In general, as long as the user doesn't access a future or promise object
 ///   from more than one thread at a time there won't be any problems.
+
+// final: 标识这个class无法被其它class继承
 template <typename T>
 class Core final {
+  // Core中保存的Result不能为void，默认会以Unit代替void
   static_assert(
       !std::is_void<T>::value,
       "void futures are not supported. Use Unit instead.");
 
  public:
+
+  // Core 保存的结果类型，用Try包裹，可以是值，也可以是异常
   using Result = Try<T>;
+
+  // Core 保存的回调函数类型，接收Result，返回空
   using Callback = folly::Function<void(Result&&)>;
 
   /// State will be Start
+
+  // 创建一个空Core，调用默认构造函数，构造后状态为Start
   static Core* make() {
     return new Core();
   }
 
   /// State will be OnlyResult
   /// Result held will be move-constructed from `t`
+
+  // 创建一个带结果的Core，构造后Core的状态为OnlyResult
   static Core* make(Try<T>&& t) {
     return new Core(std::move(t));
   }
@@ -220,14 +231,24 @@ class Core final {
   }
 
   // not copyable
+
+  // 禁止拷贝构造
   Core(Core const&) = delete;
+
+  // 禁止拷贝赋值
   Core& operator=(Core const&) = delete;
 
   // not movable (see comment in the implementation of Future::then)
+
+  // 禁止移动构造
   Core(Core&&) noexcept = delete;
+
+  // 禁止移动赋值
   Core& operator=(Core&&) = delete;
 
   /// May call from any thread
+
+  // 只有OnlyCallback和Done状态表示Core有回调函数
   bool hasCallback() const noexcept {
     constexpr auto allowed = State::OnlyCallback | State::Done;
     auto const state = state_.load(std::memory_order_acquire);
@@ -239,6 +260,8 @@ class Core final {
   /// True if state is OnlyResult or Done.
   ///
   /// Identical to `this->ready()`
+
+  // 只有OnlyResult和Done状态表示Core有回调函数
   bool hasResult() const noexcept {
     constexpr auto allowed = State::OnlyResult | State::Done;
     auto core = this;
@@ -255,6 +278,8 @@ class Core final {
   /// True if state is OnlyResult or Done.
   ///
   /// Identical to `this->hasResult()`
+
+  // Ready表示有结果
   bool ready() const noexcept {
     return hasResult();
   }
@@ -277,6 +302,8 @@ class Core final {
   ///   but the referenced result may or may not have been modified, including
   ///   possibly moved-out, depending on what the callback did; some but not
   ///   all callbacks modify (possibly move-out) the result.)
+
+  // 返回保存的Result，如果有Proxy，优先使用Proxy的Result
   Try<T>& getTry() {
     DCHECK(hasResult());
     auto core = this;
@@ -302,6 +329,10 @@ class Core final {
   /// If it transitions to Done, synchronously initiates a call to the callback,
   /// and might also synchronously execute that callback (e.g., if there is no
   /// executor or if the executor is inline).
+
+  // 设置Core的Callback
+  // 如果当前Core已经有Result了(OnlyResult状态)，则直接调用，状态变为Done
+  // 如果当前Core没有Result(Start状态)，则保存Callback，状态变为OnlyCallback
   template <typename F>
   void setCallback(F&& func, std::shared_ptr<folly::RequestContext> context) {
     DCHECK(!hasCallback());
@@ -322,6 +353,7 @@ class Core final {
 
     if (state == State::OnlyResult) {
       state_.store(State::Done, std::memory_order_relaxed);
+	  // 调用回调函数
       doCallback();
       return;
     }
@@ -339,6 +371,9 @@ class Core final {
   /// See FSM graph for allowed transitions.
   ///
   /// This can not be called concurrently with setResult().
+
+  // 设置Core的Proxy
+  // 默认情况下Core会优先使用Proxy的信息(结果，回调等)
   void setProxy(Core* proxy) {
     DCHECK(!hasResult());
 
@@ -373,6 +408,11 @@ class Core final {
   /// If it transitions to Done, synchronously initiates a call to the callback,
   /// and might also synchronously execute that callback (e.g., if there is no
   /// executor or if the executor is inline).
+
+
+  // 将结果保存，改变Core的状态
+  // 如果Core为Start，改为OnlyResult后返回
+  // 如果Core为OnlyCallback，说明正在等待结果，直接调用回调，状态改为Done
   void setResult(Try<T>&& t) {
     DCHECK(!hasResult());
 
@@ -387,6 +427,8 @@ class Core final {
             return;
           }
           assume(state == State::OnlyCallback);
+
+		  // [[fallthrough]] 表示case向下沉入是有意为之，告诉编译器不要产生警告
           FOLLY_FALLTHROUGH;
 
         case State::OnlyCallback:
@@ -494,6 +536,7 @@ class Core final {
   explicit Core(Try<T>&& t)
       : result_(std::move(t)), state_(State::OnlyResult), attached_(1) {}
 
+  // 原地构造Result
   template <typename... Args>
   explicit Core(in_place_t, Args&&... args) noexcept(
       std::is_nothrow_constructible<T, Args&&...>::value)
@@ -558,9 +601,15 @@ class Core final {
   };
 
   // May be called at most once.
+
+  // 以Result调用Callback，有两种可能的方式
+  // 1. 先设置Result后设置Callback
+  // 2. 先设置Callback后设置Results
   void doCallback() {
     DCHECK(state_ == State::Done);
 
+    // 如果有执行器，将回调函数丢到执行器中运行(可能是线程池)
+    // 否则，在当前线程内执行运行
     if (executor_) {
       auto x = std::exchange(executor_, Executor::KeepAlive<>());
 
@@ -637,6 +686,9 @@ class Core final {
 
   using Context = std::shared_ptr<RequestContext>;
 
+  // unconstrained union
+  // 旧语法中，union只能保存基本类型(POD)，只可以通过内存拷贝进行赋值的类型，同时不需要析构函数释放额外内存
+  // 新语法中，union可以保存自定义类型(NON-POD)，但是需要显式调用non-pod类型变量的析构函数
   union {
     Callback callback_;
   };
