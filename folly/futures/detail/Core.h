@@ -416,18 +416,30 @@ class Core final {
   void setResult(Try<T>&& t) {
     DCHECK(!hasResult());
 
+    // placement new，原地构造Result对象，调用Callback时传入
     ::new (&result_) Result(std::move(t));
 
+	// memory order，和memory_order_release对应
     auto state = state_.load(std::memory_order_acquire);
     while (true) {
       switch (state) {
+	  	// Core刚初始化的状态为Start，设置Result后变为OnlyResult
+	  	// compare_exchange_strong: CAS比较操作
+	  	// 1. state_ == state，将OnlyResult赋值给state_，返回true
+	  	// 2. state_ != state，将state_赋值给state，返回false
         case State::Start:
           if (state_.compare_exchange_strong(
                   state, State::OnlyResult, std::memory_order_release)) {
+            // CAS成功，状态改变完成，Result也已经赋值，直接退出
             return;
           }
+
+		  // 只有setResult和setCallback会改变state_的值
+		  // 如果CAS失败，那state_在case之后，CAS之前一定变为OnlyCallback，而state还是Start
+		  // 此时state被改为OnlyCallback
           assume(state == State::OnlyCallback);
 
+		  // 所以这里直接处理OnlyCallback的情况，不需要break
 		  // [[fallthrough]] 表示case向下沉入是有意为之，告诉编译器不要产生警告
           FOLLY_FALLTHROUGH;
 
@@ -629,6 +641,8 @@ class Core final {
       CoreAndCallbackReference guard_lambda(this);
       try {
         auto xPtr = x.get();
+
+	    // 增加到Executor调度器中(线程池)，等待执行
         xPtr->add([core_ref = std::move(guard_lambda),
                    keepAlive = std::move(x)]() mutable {
           auto cr = std::move(core_ref);
@@ -641,18 +655,24 @@ class Core final {
       } catch (...) {
         ew = exception_wrapper(std::current_exception());
       }
+	  // 如果调度器失败，则在当前上下文执行回调
       if (ew) {
         RequestContextScopeGuard rctx(context_);
         result_ = Try<T>(std::move(ew));
         callback_(std::move(result_));
       }
     } else {
+    // 如果没有设置执行器executor，就在当前上下文执行回调
       attached_.fetch_add(1, std::memory_order_relaxed);
+
+	  // RAII，调用结束时释放对象
       SCOPE_EXIT {
         context_.~Context();
         callback_.~Callback();
         detachOne();
       };
+
+	  // 以结果Result调用回调函数Callback
       RequestContextScopeGuard rctx(context_);
       callback_(std::move(result_));
     }

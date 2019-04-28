@@ -124,6 +124,9 @@ class FutureBase {
   /// - `valid() == true`
   /// - `isReady() == true`
   /// - `hasValue() == true`
+
+  // 通过一个值构造Future，将值传递给Core后返回Core*
+  // std::decay<T>::type，类似std::remove_cv_t<std::remove_reference_t<T>>
   template <
       class T2 = T,
       typename = typename std::enable_if<
@@ -138,28 +141,40 @@ class FutureBase {
   /// - `valid() == true`
   /// - `isReady() == true`
   /// - `hasValue() == true`
+
+  // 通过一个Unit构造Future，Unit是Future内部默认代替void而使用的类型
+  // 构造一个空的Core，返回Core*
   template <class T2 = T>
   /* implicit */ FutureBase(
       typename std::enable_if<std::is_same<Unit, T2>::value>::type*);
 
+  // std::is_constructible<T, Args...>::value，若T可以通过Args...进行构造则返回true
+  // 调用Core的in_place_t函数，直接构造Core下的T类型值
   template <
       class... Args,
       typename std::enable_if<std::is_constructible<T, Args&&...>::value, int>::
           type = 0>
   explicit FutureBase(in_place_t, Args&&... args);
 
+  // 禁止拷贝构造
   FutureBase(FutureBase<T> const&) = delete;
+
+  // 移动构造，修改core_，改变参数的core_为nullptr
   FutureBase(SemiFuture<T>&&) noexcept;
   FutureBase(Future<T>&&) noexcept;
 
   // not copyable
+  // 禁止拷贝构造
   FutureBase(Future<T> const&) = delete;
   FutureBase(SemiFuture<T> const&) = delete;
 
+  // 析构Core
   ~FutureBase();
 
   /// true if this has a shared state;
   /// false if this has been either moved-out or created without a shared state.
+
+  // core_存在说明当前Future被构造过，也就是一个有效的FutureBase
   bool valid() const noexcept {
     return core_ != nullptr;
   }
@@ -182,6 +197,9 @@ class FutureBase {
   /// - However calling code may mutate that value (including moving it out by
   ///   move-constructing or move-assigning another value from it), for
   ///   example, via the `&` or the `&&` overloads or via casts.
+
+  // 从Core中返回Try对应的值，如果Core::state不是OnlyResult或者Done，抛出异常
+  // 先调用result()，再从result返回的Try中获取值
   T& value() &;
   T const& value() const&;
   T&& value() &&;
@@ -203,6 +221,8 @@ class FutureBase {
   /// - However calling code may mutate that result (including moving it out by
   ///   move-constructing or move-assigning another result from it), for
   ///   example, via the `&` or the `&&` overloads or via casts.
+
+  // 获取Core::Try
   Try<T>& result() &;
   Try<T> const& result() const&;
   Try<T>&& result() &&;
@@ -213,6 +233,8 @@ class FutureBase {
   /// Preconditions:
   ///
   /// - `valid() == true` (else throws FutureInvalid)
+
+  // 如果Core有值，则为true
   bool isReady() const;
 
   /// True if the result is a value (not an exception) on a future for which
@@ -381,6 +403,9 @@ class FutureBase {
     return getCoreTryChecked(*this);
   }
 
+  // 获取FutureBase::Core::Try
+  // 如果Core还没有值(状态不是OnlyResult或者Done)，则抛出异常
+  // 如果正常，则返回对应的Try
   template <typename Self>
   static decltype(auto) getCoreTryChecked(Self& self) {
     auto& core = self.getCore();

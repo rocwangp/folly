@@ -409,25 +409,36 @@ FutureBase<T>::thenImplementation(F&& func, R) {
   p.core_->setInterruptHandlerNoLock(this->getCore().getInterruptHandler());
 
   // grab the Future now before we lose our handle on the Promise
+  // 返回一个空SemiFuture
   auto sf = p.getSemiFuture();
-  auto* e = this->getExecutor();
-  sf.setExecutor(e);
-  auto f = Future<B>(sf.core_);
-  sf.core_ = nullptr;
 
+  // 默认使用相同的调度器executor
+  auto* e = this->getExecutor();
+
+  // 设置调度器，实际使用的是Core::setExecutor
+  sf.setExecutor(e);
+
+  // Core为Future和Promise的共享状态，根据sf.core_创建一个Future用于返回
+  auto f = Future<B>(sf.core_);
+
+  // 去掉sf的core，防止析构的时候将Core销毁
+  sf.core_ = nullptr;
 
   // Future-Cur用自己的result调用这个Callback
   this->setCallback_(
       [state = futures::detail::makeCoreCallbackState(
            std::move(p), std::forward<F>(func))](Try<T>&& t) mutable {
-        if (!R::Arg::isTry() && t.hasException()) {
+		// 如果Result中包含异常，直接设置下一个Future的异常
+		if (!R::Arg::isTry() && t.hasException()) {
           state.setException(std::move(t.exception()));
         } else {
           // Ensure that if function returned a SemiFuture we correctly chain
           // potential deferral.
 
-		  // 此时返回的是个Future<>
+		  // 通过state(t)调用then传入的Function，此时返回的是个Future<>
           auto tf2 = detail_msvc_15_7_workaround::tryInvoke(R{}, state, t);
+
+		  // 如果调用出现异常，直接set到Future-New的Result中
           if (tf2.hasException()) {
             state.setException(std::move(tf2.exception()));
           } else {
@@ -436,7 +447,9 @@ FutureBase<T>::thenImplementation(F&& func, R) {
             auto statePromise = state.stealPromise();
             auto tf3 = chainExecutor(
                 statePromise.core_->getExecutor(), *std::move(tf2));
-            std::exchange(statePromise.core_, nullptr)
+			// Core会优先使用Proxy执行Callback，使用Core::setProxy设置
+			// 同时将statePromise的Core制空防止析构Core
+			std::exchange(statePromise.core_, nullptr)
                 ->setProxy(std::exchange(tf3.core_, nullptr));
           }
         }
@@ -1093,6 +1106,8 @@ typename std::
       });
 }
 
+// 设置Core的executor，在Core::doCallback时会通过executor执行Callback
+// 重新创建一个Future和当前Future共享Core，然后重置当前Future
 template <class T>
 Future<T> Future<T>::via(Executor::KeepAlive<> executor) && {
   this->setExecutor(std::move(executor));
@@ -1108,14 +1123,21 @@ Future<T> Future<T>::via(Executor::KeepAlive<> executor, int8_t priority) && {
       ExecutorWithPriority::create(std::move(executor), priority));
 }
 
+// 使用调度器调度当前的Future，改变Future::Core下的executor，返回新的Future
 template <class T>
 Future<T> Future<T>::via(Executor::KeepAlive<> executor) & {
   this->throwIfInvalid();
+
+  // 构造Future-New
   Promise<T> p;
   auto sf = p.getSemiFuture();
   auto func = [p = std::move(p)](Try<T>&& t) mutable {
     p.setTry(std::move(t));
   };
+
+  // thenImplementation会返回Future-New作为下次调用链的起始Future
+  // 但是可以通过func函数直接setTry设置Promise的返回值来激活当前的Future-New
+  // 不需要使用thenImplementation的返回Future
   using R = futures::detail::callableResult<T, decltype(func)>;
   this->thenImplementation(std::move(func), R{});
   // Construct future from semifuture manually because this may not have
@@ -1144,6 +1166,7 @@ Future<typename isFuture<R>::Inner> Future<T>::then(
   });
 }
 
+// 接收一个Try，包装的lambda调用f通过f(try)
 template <class T>
 template <typename F>
 Future<typename futures::detail::tryCallableResult<T, F>::value_type>
@@ -1155,6 +1178,7 @@ Future<T>::thenTry(F&& func) && {
   return this->thenImplementation(std::move(lambdaFunc), R{});
 }
 
+// 接收一个异常和Try，包装的lambda调用f通过f(exception, try)
 template <class T>
 template <typename F>
 Future<typename futures::detail::tryExecutorCallableResult<T, F>::value_type>
@@ -1173,7 +1197,7 @@ Future<T>::thenExTry(F&& func) && {
   return this->thenImplementation(std::move(lambdaFunc), R{});
 }
 
-// 接收一个value而不是Try<>
+// 接收一个value而不是Try<>，包装的lambda调用f通过f(value)
 template <class T>
 template <typename F>
 // 获取F函数的返回值类型
@@ -1221,6 +1245,8 @@ typename std::enable_if<
     isFutureOrSemiFuture<invoke_result_t<F, ExceptionType>>::value,
     Future<T>>::type
 Future<T>::thenError(tag_t<ExceptionType>, F&& func) && {
+
+  // 构造Future-New
   Promise<T> p;
   auto sf = p.getSemiFuture();
   auto* ePtr = this->getExecutor();
@@ -1231,9 +1257,13 @@ Future<T>::thenError(tag_t<ExceptionType>, F&& func) && {
            std::move(p), std::forward<F>(func))](Try<T>&& t) mutable {
         if (auto ex = t.template tryGetExceptionObject<
                       std::remove_reference_t<ExceptionType>>()) {
+          // 使用异常对象调用onError回调函数，返回Future<>
           auto tf2 = state.tryInvoke(std::move(*ex));
+		  // 如果回调函数仍然抛出异常，则设置Future-New的状态为异常
           if (tf2.hasException()) {
             state.setException(std::move(tf2.exception()));
+		  // 如果执行正常，返回的类型需要和Future-Cur相同，所以参数接收仍然是Try<T>
+		  // 传递给Future-New
           } else {
             tf2->setCallback_([p = state.stealPromise()](Try<T>&& t3) mutable {
               p.setTry(std::move(t3));
@@ -1247,6 +1277,9 @@ Future<T>::thenError(tag_t<ExceptionType>, F&& func) && {
   return std::move(sf).via(std::move(e));
 }
 
+// 接收一个异常，onError(exception, func)中的func不是只有出现异常才会执行
+// 而是正常执行时(无异常)也会进入func，只是会通过判断当前是否有异常来觉得是直接保存上一个Future的结果
+// 还是调用异常处理函数
 template <class T>
 template <class ExceptionType, class F>
 typename std::enable_if<
@@ -1729,6 +1762,11 @@ collectSemiFuture(InputIterator first, InputIterator last) {
   futures::detail::stealDeferredExecutors(executors, first, last);
 
   auto ctx = std::make_shared<Context>(std::distance(first, last));
+
+  // Context在析构的时候会将std::vector<T> set到Promise上(Promsie::setValue)
+  // 通过返回ctx->promise::future，外部可以继续链接调用通过then
+  // 当所有的callback(从first到last)都完成后，ctx的引用计数归零，Context析构函数被触发
+  // 调用链继续
   for (size_t i = 0; first != last; ++first, ++i) {
     first->setCallback_([i, ctx](Try<T>&& t) {
       if (t.hasException()) {

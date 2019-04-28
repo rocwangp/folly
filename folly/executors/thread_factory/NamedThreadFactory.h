@@ -27,6 +27,7 @@
 
 namespace folly {
 
+// 线程工厂类，创建线程时修改线程名字
 class NamedThreadFactory : public ThreadFactory {
  public:
   explicit NamedThreadFactory(folly::StringPiece prefix)
