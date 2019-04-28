@@ -907,6 +907,7 @@ SemiFuture<T>& SemiFuture<T>::operator=(Future<T>&& other) noexcept {
   return *this;
 }
 
+// SemiFuture
 template <class T>
 Future<T> SemiFuture<T>::via(Executor::KeepAlive<> executor) && {
   if (!executor) {
@@ -1032,13 +1033,16 @@ SemiFuture<T> SemiFuture<T>::deferError(F&& func) && {
       });
 }
 
+// 返回一个SemiFuture，这个Future在dur时间后被Ready
 template <typename T>
 SemiFuture<T> SemiFuture<T>::delayed(Duration dur, Timekeeper* tk) && {
-  return collectAllSemiFuture(*this, futures::sleep(dur, tk))
-      .toUnsafeFuture()
-      .thenValue([](std::tuple<Try<T>, Try<Unit>> tup) {
-        Try<T>& t = std::get<0>(tup);
-        return makeFuture<T>(std::move(t));
+  // futures::sleep返回一个Future，这个Future在dur时间后Ready
+  // 将当前SemiFuture和sleep返回的Future合并成一个Future<std::tuple<Try<T>, Try<Unit>>>
+  return collectAllSemiFuture(*this, futures::sleep(dur, tk))	// futures::sleep由时间轮控制
+      .toUnsafeFuture()	// 将SemiFuture转换成Future，使用InlineExecutor，使得Core直接执行Callback
+      .thenValue([](std::tuple<Try<T>, Try<Unit>> tup) {	// collect的结果是std::tuple<Try<T>...>
+        Try<T>& t = std::get<0>(tup);	// 获取当前SemiFuture的值后返回
+        return makeFuture<T>(std::move(t));	// 达到延迟的效果
       });
 }
 
@@ -1635,10 +1639,18 @@ void stealDeferredExecutors(
 
 // collectAll (variadic)
 
+
+// 将多个SemiFuture<T>转换成一个SemiFuture<std::tuple<Try<T1>, Try<T2>, ...>>
 template <typename... Fs>
 SemiFuture<std::tuple<Try<typename remove_cvref_t<Fs>::value_type>...>>
 collectAllSemiFuture(Fs&&... fs) {
+  // remove_cv: 移除const/volatile
+  // remove_reference: 移除引用
   using Result = std::tuple<Try<typename remove_cvref_t<Fs>::value_type>...>;
+
+  // 等待所有SemiFuture完成的Context
+  // 通过设置每个SemiFuture的Callback来维护shared_ptr的生存期并在执行完成时设置Context::results中的某一项
+  // Context析构的时候通过Promise::setValue激活返回给Caller的SemiFuture
   struct Context {
     ~Context() {
       p.setValue(std::move(results));
@@ -1647,19 +1659,26 @@ collectAllSemiFuture(Fs&&... fs) {
     Result results;
   };
 
+  // 收集所有SemiFuture的Executor
   std::vector<folly::Executor::KeepAlive<futures::detail::DeferredExecutor>>
       executors;
   futures::detail::stealDeferredExecutorsVariadic(executors, fs...);
 
   auto ctx = std::make_shared<Context>();
+
+  // 对每个SemiFuture(fs...)调用lamdba
   futures::detail::foreach(
       [&](auto i, auto&& f) {
+        // 保存context的shared_ptr
+        // 这样就保证了当所有的SemiFuture都Ready后，Context才会析构
         f.setCallback_([i, ctx](auto&& t) {
+          // 设置对应项的value
           std::get<i.value>(ctx->results) = std::move(t);
         });
       },
       static_cast<Fs&&>(fs)...);
 
+  // 从Context::Promise中获取SemiFuture
   auto future = ctx->p.getSemiFuture();
   if (!executors.empty()) {
     auto work = [](Try<typename decltype(future)::value_type>&& t) {
