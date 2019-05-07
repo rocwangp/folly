@@ -25,9 +25,15 @@ QueuedImmediateExecutor& QueuedImmediateExecutor::instance() {
   return *instance;
 }
 
+// 类似InlineExecutor，区别是不会递归调用
+// 如果func中递归调用了add(func1)
+// 对于InlineExecutor，会在func中调用func1
+// 对于QueuedImmediateExecutr，会先调用func再调用func1
 void QueuedImmediateExecutor::add(Func callback) {
   auto& q = *q_;
   q.push(std::move(callback));
+
+  // q.size() == 1标识第一次进入add而不是q.front()()的第n次进入
   if (q.size() == 1) {
     while (!q.empty()) {
       q.front()();

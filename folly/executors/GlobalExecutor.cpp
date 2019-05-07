@@ -67,6 +67,7 @@ class GlobalExecutor {
   Function<std::unique_ptr<ExecutorBase>()> constructDefault_;
 };
 
+// CPU Executor是一个InlineExecutor
 Singleton<GlobalExecutor<Executor>> gGlobalCPUExecutor([] {
   return new GlobalExecutor<Executor>(
       // Default global CPU executor is an InlineExecutor.

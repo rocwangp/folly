@@ -27,6 +27,8 @@ namespace folly {
 /// When work is "queued", execute it immediately inline.
 /// Usually when you think you want this, you actually want a
 /// QueuedImmediateExecutor.
+
+// 内联调度器，add时就在当前上下文调用callback
 class InlineExecutor : public Executor {
  public:
   FOLLY_ATTR_VISIBILITY_HIDDEN FOLLY_ALWAYS_INLINE static InlineExecutor&

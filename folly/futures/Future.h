@@ -965,6 +965,8 @@ class Future : private futures::detail::FutureBase<T> {
 
  public:
   /// Type of the value that the producer, when successful, produces.
+
+  // value_type是类型T的别名
   using typename Base::value_type;
 
   /// Construct a Future from a value (perfect forwarding)
@@ -975,6 +977,10 @@ class Future : private futures::detail::FutureBase<T> {
   /// - `isReady() == true`
   /// - `hasValue() == true`
   /// - `value()`, `get()`, `result()` will return the forwarded `T`
+
+  // 根据一个值构造Future，T不是Future也不是SemiFuture
+  // 直接将T2&& val传递给Core构造
+  // std::decay<T>::type，返回T的原始类型，等价于std::remove_cv_t<std::remove_reference_t<T>>
   template <
       class T2 = T,
       typename = typename std::enable_if<
@@ -989,6 +995,9 @@ class Future : private futures::detail::FutureBase<T> {
   /// - `valid() == true`
   /// - `isReady() == true`
   /// - `hasValue() == true`
+
+  // 从一个Unit*构造Future
+  // std::enable_if_t<bool, class Tp = void>
   template <class T2 = T>
   /* implicit */ Future(
       typename std::enable_if<std::is_same<Unit, T2>::value>::type* p = nullptr)
@@ -1003,6 +1012,9 @@ class Future : private futures::detail::FutureBase<T> {
   /// - `hasValue() == true`
   /// - `hasException() == false`
   /// - `value()`, `get()`, `result()` will return the newly constructed `T`
+  // 通过参数args...原地构造T类型值
+  // std::is_constructible<T, Args...>::value，如果可以通过Args...构造T，则具有true的value
+  // in_place_t: 消歧义标志，标识应该利用args...原地构造类型为T的值
   template <
       class... Args,
       typename std::enable_if<std::is_constructible<T, Args&&...>::value, int>::
@@ -1010,11 +1022,17 @@ class Future : private futures::detail::FutureBase<T> {
   explicit Future(in_place_t, Args&&... args)
       : Base(in_place, std::forward<Args>(args)...) {}
 
+  // 禁止拷贝构造
   Future(Future<T> const&) = delete;
   // movable
+  // 移动构造
   Future(Future<T>&&) noexcept;
 
   // converting move
+
+  // 如果T和T2可以互相转换，则允许通过Future<T2&&>构造Future<T>
+  // std::is_constructible<T, Args...>::value 如果T可以通过Args...构造，则返回true
+  // std::is_convertible<T1, T2>::value，如果T1可以转换为T2，则返回true
   template <
       class T2,
       typename std::enable_if<
@@ -1023,6 +1041,9 @@ class Future : private futures::detail::FutureBase<T> {
               std::is_convertible<T2&&, T>::value,
           int>::type = 0>
   /* implicit */ Future(Future<T2>&&);
+
+  // T2不能转换为T时的构造函数
+  // 一个可以隐式构造(没有explicit)，一个不可以
   template <
       class T2,
       typename std::enable_if<
@@ -1031,6 +1052,8 @@ class Future : private futures::detail::FutureBase<T> {
               !std::is_convertible<T2&&, T>::value,
           int>::type = 0>
   explicit Future(Future<T2>&&);
+
+  // 赋值运算符
   template <
       class T2,
       typename std::enable_if<
@@ -1055,12 +1078,18 @@ class Future : private futures::detail::FutureBase<T> {
   /// Postcondition:
   ///
   /// - `RESULT.valid() == false`
+
+  // 构造一个空的Future，调用构造函数Future<EmptyConstruct>
+  // FutureBase会对这个参数进行重载，将core_设置为nullptr
+  // 所以当getCore的时候会抛异常
   static Future<T> makeEmpty();
 
   // not copyable
+  // 禁止拷贝赋值
   Future& operator=(Future const&) = delete;
 
   // movable
+  // 移动赋值
   Future& operator=(Future&&) noexcept;
 
   /// Call e->drive() repeatedly until the future is fulfilled.
@@ -1068,6 +1097,8 @@ class Future : private futures::detail::FutureBase<T> {
   /// Examples of DrivableExecutor include EventBase and ManualExecutor.
   ///
   /// Returns the fulfilled value (moved-out) or throws the fulfilled exception.
+
+  // 等待Future的值，返回值通过指定Executor获取
   T getVia(DrivableExecutor* e);
 
   /// Call e->drive() repeatedly until the future is fulfilled, or `dur`
@@ -1113,6 +1144,10 @@ class Future : private futures::detail::FutureBase<T> {
   ///
   /// - `valid() == false`
   /// - `RESULT.valid() == true`
+
+  // 可以把Executor看成不同的执行器或线程(池)
+  // via的作用就是将当前Future::Core::Executor设置成目标执行器
+  // 这样在Core::doCallback的时候会通过这个executor来执行callback
   Future<T> via(Executor::KeepAlive<> executor) &&;
   Future<T> via(Executor::KeepAlive<> executor, int8_t priority) &&;
 

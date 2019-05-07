@@ -35,6 +35,8 @@ namespace folly {
 ///
 /// NB No attempt has been made to make anything other than add and schedule
 /// threadsafe.
+
+// 手动执行器，只有当手动调用executor::run()的时候，才会去执行队列中的任务
 class ManualExecutor : public DrivableExecutor,
                        public ScheduledExecutor,
                        public SequencedExecutor {
@@ -87,9 +89,15 @@ class ManualExecutor : public DrivableExecutor,
 #endif
   }
 
+  // 覆盖ScheduleExecutor::scheduleAt，由ScheduleExecutor::schedule调用
   void scheduleAt(Func&& f, TimePoint const& t) override {
+    // 上锁
     std::lock_guard<std::mutex> lock(lock_);
+
+	// 添加到超时队列中
     scheduledFuncs_.emplace(t, std::move(f));
+
+	// 激活信号量
     sem_.post();
   }
 
@@ -97,6 +105,8 @@ class ManualExecutor : public DrivableExecutor,
   /// Advancing the clock causes some work to be done, if work is available
   /// to do (perhaps newly available because of the advanced clock).
   /// If dur is <= 0 this is a noop.
+
+  // 将执行器的时钟向后推进dur
   void advance(Duration const& dur) {
     advanceTo(now_ + dur);
   }
@@ -105,12 +115,15 @@ class ManualExecutor : public DrivableExecutor,
   /// this is a noop.
   void advanceTo(TimePoint const& t);
 
+  // 返回当前执行器的时钟
   TimePoint now() override {
     return now_;
   }
 
   /// Flush the function queue. Destroys all stored functions without
   /// executing them. Returns number of removed functions.
+
+  // 清理所有任务队列中的任务，返回数量
   std::size_t clear() {
     std::queue<Func> funcs;
     std::priority_queue<ScheduledFunc> scheduled_funcs;
@@ -125,8 +138,13 @@ class ManualExecutor : public DrivableExecutor,
   }
 
  private:
+  // 任务队列锁
   std::mutex lock_;
+
+  // 任务队列
   std::queue<Func> funcs_;
+
+  // 任务队列信号量
   LifoSem sem_;
 
   // helper class to enable ordering of scheduled events in the priority

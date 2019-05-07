@@ -268,6 +268,8 @@ void FutureBase<T>::setCallback_(F&& func) {
   getCore().setCallback(std::forward<F>(func), RequestContext::saveContext());
 }
 
+// 构造一个空的Future(通过makeEmpty)
+// 设置core为nullptr，在getCore中会抛出异常
 template <class T>
 FutureBase<T>::FutureBase(futures::detail::EmptyConstruct) noexcept
     : core_(nullptr) {}
@@ -1789,9 +1791,15 @@ collectSemiFuture(InputIterator first, InputIterator last) {
   for (size_t i = 0; first != last; ++first, ++i) {
     first->setCallback_([i, ctx](Try<T>&& t) {
       if (t.hasException()) {
+	  	// threw用来控制[first, last)中的SemiFuture是否有抛出异常的Future
+	  	// 如果有则其它SemiFuture的结果变得无效
+	  	// std::atomic<bool>::exchange(desired)
+	  	// 原子地交换*this和desired，返回*this的旧值
         if (!ctx->threw.exchange(true, std::memory_order_relaxed)) {
+		  // 如果为false说明第一次发生异常，直接setEx到Promise激活外部的Future
           ctx->p.setException(std::move(t.exception()));
         }
+	  // 如果之前发生过异常，就不再为results赋值，因为Promise已经setEx了
       } else if (!ctx->threw.load(std::memory_order_relaxed)) {
         ctx->result[i] = std::move(t.value());
       }
@@ -1889,6 +1897,9 @@ collectAny(InputIterator first, InputIterator last) {
   using F = typename std::iterator_traits<InputIterator>::value_type;
   using T = typename F::value_type;
 
+  // Context包含最早成功的那个Future的结果
+  // 返回值pair<size_t, Try<T>>中，size_t是Future的index, Try<T>是该Future的结果
+  // done用来保证最终只有一个Future能调用p.setValue
   struct Context {
     Promise<std::pair<size_t, Try<T>>> p;
     std::atomic<bool> done{false};
@@ -1917,9 +1928,17 @@ collectAnyWithoutException(InputIterator first, InputIterator last) {
 
   struct Context {
     Context(size_t n) : nTotal(n) {}
+
+	// 保存最终Future返回的结果
     Promise<std::pair<size_t, T>> p;
+
+	// 标识是否已经有Future完成并成功设置了Promise结果
     std::atomic<bool> done{false};
+
+	// 出现异常的Future数量，到达nTotal时说明所有Future都返回了异常，抛出最后一个Future的异常
     std::atomic<size_t> nFulfilled{0};
+
+	// 所有Future的个数
     size_t nTotal;
   };
 
@@ -1930,9 +1949,11 @@ collectAnyWithoutException(InputIterator first, InputIterator last) {
   auto ctx = std::make_shared<Context>(size_t(std::distance(first, last)));
   for (size_t i = 0; first != last; ++first, ++i) {
     first->setCallback_([i, ctx](Try<T>&& t) {
+	  // 如果这个Future的返回结果非异常，可以直接设置Promise的结果
       if (!t.hasException() &&
           !ctx->done.exchange(true, std::memory_order_relaxed)) {
         ctx->p.setValue(std::make_pair(i, std::move(t.value())));
+	  // 如果所有的Future结果都是异常，则将异常抛出
       } else if (
           ctx->nFulfilled.fetch_add(1, std::memory_order_relaxed) + 1 ==
           ctx->nTotal) {
@@ -1955,6 +1976,7 @@ collectAnyWithoutException(InputIterator first, InputIterator last) {
 
 // collectN (iterator)
 
+// 从[first, last)中等待n个Future结束，返回Future<vector<pair<size_t, Try<T>>
 template <class InputIterator>
 SemiFuture<std::vector<std::pair<
     size_t,
@@ -1962,8 +1984,11 @@ SemiFuture<std::vector<std::pair<
 collectN(InputIterator first, InputIterator last, size_t n) {
   using F = typename std::iterator_traits<InputIterator>::value_type;
   using T = typename F::value_type;
+
+  // 返回类型Future<Result>
   using Result = std::vector<std::pair<size_t, Try<T>>>;
 
+  // Future集合上下文
   struct Context {
     explicit Context(size_t numFutures, size_t min_)
         : v(numFutures), min(min_) {}
@@ -1978,6 +2003,7 @@ collectN(InputIterator first, InputIterator last, size_t n) {
   assert(n > 0);
   assert(std::distance(first, last) >= 0);
 
+  // Future数量不合法
   if (size_t(std::distance(first, last)) < n) {
     return SemiFuture<Result>(
         exception_wrapper(std::runtime_error("Not enough futures")));
@@ -1992,12 +2018,14 @@ collectN(InputIterator first, InputIterator last, size_t n) {
   // vector
   auto ctx = std::make_shared<Context>(size_t(std::distance(first, last)), n);
   for (size_t i = 0; first != last; ++first, ++i) {
-    first->setCallback_([i, ctx](Try<T>&& t) {
+    first->setCallback_([i, ctx](Try<T>&& t) {	
       // relaxed because this guards control but does not guard data
+      // 已经达到完成的Future的数量
       auto const c = 1 + ctx->completed.fetch_add(1, std::memory_order_relaxed);
       if (c > ctx->min) {
         return;
       }
+	  // 设置Future的结果
       ctx->v[i] = std::move(t);
 
       // release because the stored values in all threads must be visible below
@@ -2006,6 +2034,7 @@ collectN(InputIterator first, InputIterator last, size_t n) {
       if (s < ctx->min) {
         return;
       }
+	  // 当结果数量达到n时，设置Result
       Result result;
       result.reserve(ctx->completed.load());
       for (size_t j = 0; j < ctx->v.size(); ++j) {
@@ -2336,6 +2365,7 @@ void waitViaImpl(Future<T>& f, DrivableExecutor* e) {
   if (f.isReady()) {
     return;
   }
+  // 一直驱动Exector来获取Future的值
   f = std::move(f).via(e).thenValue([](T&& t) { return std::move(t); });
   while (!f.isReady()) {
     e->drive();
@@ -2360,6 +2390,8 @@ void waitViaImpl(
       [keepAlive = getKeepAliveToken(e)](T&& t) { return std::move(t); });
   auto now = std::chrono::steady_clock::now();
   auto deadline = now + timeout;
+
+  // 带有超时的drive
   while (!f.isReady() && (now < deadline)) {
     e->try_drive_until(deadline);
     now = std::chrono::steady_clock::now();

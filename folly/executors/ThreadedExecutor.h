@@ -52,6 +52,9 @@ namespace folly {
  *  offload sleep-heavy tasks from the CPU executor, where they might otherwise
  *  be run.
  */
+
+// 一个后台控制线程，无限循环判断任务队列是否为空(条件变量和互斥量作用)
+// 对于任务队列中的每个任务，创建一个新的线程执行这个callback
 class ThreadedExecutor : public virtual folly::Executor {
  public:
   explicit ThreadedExecutor(
@@ -80,19 +83,25 @@ class ThreadedExecutor : public virtual folly::Executor {
 
   std::shared_ptr<ThreadFactory> threadFactory_;
 
+  // stop flags
   std::atomic<bool> stopping_{false};
 
+  // 条件变量/互斥量，用来唤醒后台线程
   std::mutex controlm_;
   std::condition_variable controlc_;
   bool controls_ = false;
+
+  // 后台控制线程
   std::thread controlt_;
 
+  // 任务队列
   std::mutex enqueuedm_;
   std::deque<Func> enqueued_;
 
   //  Accessed only by the control thread, so no synchronization.
   std::map<std::thread::id, std::thread> running_;
 
+  // 已经执行完成的callback所在的线程id
   std::mutex finishedm_;
   std::deque<std::thread::id> finished_;
 };
