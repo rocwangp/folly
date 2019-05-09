@@ -111,6 +111,9 @@ void CPUThreadPoolExecutor::add(
     Func func,
     std::chrono::milliseconds expiration,
     Func expireCallback) {
+
+  // taskQueue_: 阻塞队列，线程在threadRun中会阻塞take任务
+  // 相当于生产者消费者队列
   auto result = taskQueue_->add(
       CPUTask(std::move(func), expiration, std::move(expireCallback)));
   if (!result.reusedThread) {
@@ -150,6 +153,8 @@ CPUThreadPoolExecutor::getTaskQueue() {
 }
 
 // threadListLock_ must be writelocked.
+
+// 调用这个函数之前，threadListLock_需要被锁住，否则memeory_order_relaxed屏障过于宽松会有问题
 bool CPUThreadPoolExecutor::tryDecrToStop() {
   auto toStop = threadsToStop_.load(std::memory_order_relaxed);
   if (toStop <= 0) {
@@ -171,22 +176,37 @@ bool CPUThreadPoolExecutor::taskShouldStop(folly::Optional<CPUTask>& task) {
   return true;
 }
 
+// 覆盖基类ThreadPoolExecutor::threadRun的纯虚函数
+// 创建一个新的线程时，这个线程会调用该函数
 void CPUThreadPoolExecutor::threadRun(ThreadPtr thread) {
   this->threadPoolHook_.registerThread();
 
+  // 表示当前线程开始工作
   thread->startupBaton.post();
+
+  // 无限循环，从任务队列中取出任务并执行
   while (true) {
+
+    // taskQueue_: 阻塞队列
     auto task = taskQueue_->try_take_for(threadTimeout_);
     // Handle thread stopping, either by task timeout, or
     // by 'poison' task added in join() or stop().
+    
     if (UNLIKELY(!task || task.value().poison)) {
       // Actually remove the thread from the list.
       SharedMutex::WriteHolder w{&threadListLock_};
+
+	  // 某一特殊类型的task，用于提示线程退出
       if (taskShouldStop(task)) {
+
+	    // 调用观察者线程退出函数
         for (auto& o : observers_) {
           o->threadStopped(thread.get());
         }
+		// 将当前线程从线程列表中删除
         threadList_.remove(thread);
+
+		// 当前线程退出，放到stoppedThreads_中，等待被join
         stoppedThreads_.add(thread);
         return;
       } else {
@@ -194,10 +214,14 @@ void CPUThreadPoolExecutor::threadRun(ThreadPtr thread) {
       }
     }
 
+	// 在当前线程运行任务task
     runTask(thread, std::move(task.value()));
 
+	// 如果需要退出的线程数非零，则尝试退出当前线程
     if (UNLIKELY(threadsToStop_ > 0 && !isJoin_)) {
       SharedMutex::WriteHolder w{&threadListLock_};
+
+	  // 当前线程获取到了退出名额
       if (tryDecrToStop()) {
         threadList_.remove(thread);
         stoppedThreads_.add(thread);
@@ -207,6 +231,7 @@ void CPUThreadPoolExecutor::threadRun(ThreadPtr thread) {
   }
 }
 
+// 停止n个线程，向阻塞队列中添加n个空任务，提示获取到这种类型任务的线程退出
 void CPUThreadPoolExecutor::stopThreads(size_t n) {
   threadsToStop_ += n;
   for (size_t i = 0; i < n; i++) {
@@ -215,6 +240,7 @@ void CPUThreadPoolExecutor::stopThreads(size_t n) {
 }
 
 // threadListLock_ is read (or write) locked.
+// 阻塞队列中的任务数就是等待被执行的任务数
 size_t CPUThreadPoolExecutor::getPendingTaskCountImpl() const {
   return taskQueue_->size();
 }

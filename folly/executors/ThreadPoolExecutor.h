@@ -67,15 +67,18 @@ class ThreadPoolExecutor : public DefaultKeepAliveExecutor {
   virtual void
   add(Func func, std::chrono::milliseconds expiration, Func expireCallback);
 
+  // 设置线程工厂对象，用于创建线程
   void setThreadFactory(std::shared_ptr<ThreadFactory> threadFactory) {
     CHECK(numThreads() == 0);
     threadFactory_ = std::move(threadFactory);
   }
 
+  // 获取线程工厂对象
   std::shared_ptr<ThreadFactory> getThreadFactory() const {
     return threadFactory_;
   }
 
+  // 获取最大的线程数
   size_t numThreads() const;
   void setNumThreads(size_t numThreads);
 
@@ -167,6 +170,7 @@ class ThreadPoolExecutor : public DefaultKeepAliveExecutor {
 
   struct TaskStatsCallbackRegistry;
 
+  // 线程对象
   struct alignas(hardware_destructive_interference_size) Thread
       : public ThreadHandle {
     explicit Thread(ThreadPoolExecutor* pool)
@@ -180,9 +184,14 @@ class ThreadPoolExecutor : public DefaultKeepAliveExecutor {
 
     static std::atomic<uint64_t> nextId;
     uint64_t id;
+	// 内部handle，std::thread
     std::thread handle;
+
+	// 是否空闲
     bool idle;
     std::chrono::steady_clock::time_point lastActiveTime;
+
+	// 标志是否开始的信号量
     folly::Baton<> startupBaton;
     std::shared_ptr<TaskStatsCallbackRegistry> taskStatsCallbacks;
   };
@@ -220,6 +229,8 @@ class ThreadPoolExecutor : public DefaultKeepAliveExecutor {
   void joinStoppedThreads(size_t n);
 
   // Create a suitable Thread struct
+
+  // 创建一个线程对象shared_ptr
   virtual ThreadPtr makeThread() {
     return std::make_shared<Thread>(this);
   }

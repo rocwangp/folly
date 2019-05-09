@@ -39,12 +39,13 @@ ThreadPoolExecutor::ThreadPoolExecutor(
     size_t minThreads,
     std::shared_ptr<ThreadFactory> threadFactory,
     bool isWaitForAll)
-    : threadFactory_(std::move(threadFactory)),
-      isWaitForAll_(isWaitForAll),
+    : threadFactory_(std::move(threadFactory)),		// 线程工厂函数，用来创建线程
+      isWaitForAll_(isWaitForAll),					// 
       taskStatsCallbacks_(std::make_shared<TaskStatsCallbackRegistry>()),
-      threadPoolHook_("folly::ThreadPoolExecutor"),
-      minThreads_(minThreads),
-      threadTimeout_(FLAGS_threadtimeout_ms) {
+      threadPoolHook_("folly::ThreadPoolExecutor"),	// 线程池追踪
+      minThreads_(minThreads),						// 线程池中最小的线程数
+      threadTimeout_(FLAGS_threadtimeout_ms) {		
+  // 追踪当前线程池
   getSyncVecThreadPoolExecutors()->push_back(this);
 }
 
@@ -68,17 +69,29 @@ ThreadPoolExecutor::Task::Task(
   enqueueTime_ = std::chrono::steady_clock::now();
 }
 
+// 在指定线程运行任务task
 void ThreadPoolExecutor::runTask(const ThreadPtr& thread, Task&& task) {
+  // 空闲标志设置为false
   thread->idle = false;
+
+  // 计算开始时间
   auto startTime = std::chrono::steady_clock::now();
+
+  // 设置task的等待时间 = 开始执行时间 - 入队时间
   task.stats_.waitTime = startTime - task.enqueueTime_;
+
+  // 判断task是否超时
   if (task.expiration_ > std::chrono::milliseconds(0) &&
       task.stats_.waitTime >= task.expiration_) {
-    task.stats_.expired = true;
+	// 设置task的超时标志
+	task.stats_.expired = true;
+
+	// 超时回调不为空时调用
     if (task.expireCallback_ != nullptr) {
       task.expireCallback_();
     }
   } else {
+    // 没有超时，直接调用
     folly::RequestContextScopeGuard rctx(task.context_);
     try {
       task.func_();
@@ -89,16 +102,24 @@ void ThreadPoolExecutor::runTask(const ThreadPtr& thread, Task&& task) {
       LOG(ERROR) << "ThreadPoolExecutor: func threw unhandled non-exception "
                     "object";
     }
+	// 计算task的运行时间 = 结束时间 - 开始执行时间
     task.stats_.runTime = std::chrono::steady_clock::now() - startTime;
   }
+  // 线程空闲标志设置为true
   thread->idle = true;
+
+  // 设置上一次执行任务完成的时间
   thread->lastActiveTime = std::chrono::steady_clock::now();
+
+  // 线程执行完每个任务后需要执行的回调
   thread->taskStatsCallbacks->callbackList.withRLock([&](auto& callbacks) {
+    // 设置正在执行回调
     *thread->taskStatsCallbacks->inCallback = true;
     SCOPE_EXIT {
       *thread->taskStatsCallbacks->inCallback = false;
     };
     try {
+	  // 对于当前完成的任务，调用每个回调
       for (auto& callback : callbacks) {
         callback(task.stats_);
       }
@@ -118,10 +139,12 @@ void ThreadPoolExecutor::add(Func, std::chrono::milliseconds, Func) {
       "add() with expiration is not implemented for this Executor");
 }
 
+// 返回线程池允许的最大线程数
 size_t ThreadPoolExecutor::numThreads() const {
   return maxThreads_.load(std::memory_order_relaxed);
 }
 
+// 返回线程池当前的线程数
 size_t ThreadPoolExecutor::numActiveThreads() const {
   return activeThreads_.load(std::memory_order_relaxed);
 }
@@ -147,21 +170,40 @@ void ThreadPoolExecutor::setNumThreads(size_t numThreads) {
 
   size_t numThreadsToJoin = 0;
   {
+    // 要动态改变线程数量，先上锁
     SharedMutex::WriteHolder w{&threadListLock_};
+
+	// 获取当前等待执行的任务数
     auto pending = getPendingTaskCountImpl();
+
+	// numThreads是最大的线程数
     maxThreads_.store(numThreads, std::memory_order_relaxed);
+
+	// 获取当前的线程数
     auto active = activeThreads_.load(std::memory_order_relaxed);
+
+	// 获取线程池规定的最小线程数
     auto minthreads = minThreads_.load(std::memory_order_relaxed);
+
+	// 线程池的最小线程数仍然大于目标线程数
+	// 减小minthreads_
     if (numThreads < minthreads) {
       minthreads = numThreads;
       minThreads_.store(numThreads, std::memory_order_relaxed);
     }
+
+	// 当前线程数大于目标线程数
+	// join掉一定数量的线程
     if (active > numThreads) {
+	  // 计算需要join的线程数
       numThreadsToJoin = active - numThreads;
       if (numThreadsToJoin > active - minthreads) {
         numThreadsToJoin = active - minthreads;
       }
+	  // 删除一定数量的线程
       ThreadPoolExecutor::removeThreads(numThreadsToJoin, false);
+
+	  // 设置当前线程数
       activeThreads_.store(
           active - numThreadsToJoin, std::memory_order_relaxed);
     } else if (pending > 0 || observers_.size() > 0 || active < minthreads) {
@@ -172,6 +214,8 @@ void ThreadPoolExecutor::setNumThreads(size_t numThreads) {
       if (active + numToAdd < minthreads) {
         numToAdd = minthreads - active;
       }
+
+	  // 增加固定数量的线程
       ThreadPoolExecutor::addThreads(numToAdd);
       activeThreads_.store(active + numToAdd, std::memory_order_relaxed);
     }
@@ -182,21 +226,37 @@ void ThreadPoolExecutor::setNumThreads(size_t numThreads) {
 }
 
 // threadListLock_ is writelocked
+
+// 在线程池中增加n个线程
 void ThreadPoolExecutor::addThreads(size_t n) {
   std::vector<ThreadPtr> newThreads;
+
+  // 创建n个线程wrapper，保存到容器中
   for (size_t i = 0; i < n; i++) {
     newThreads.push_back(makeThread());
   }
   for (auto& thread : newThreads) {
     // TODO need a notion of failing to create the thread
     // and then handling for that case
+
+	// 对于每个wrapper，创建一个新的线程与之对应
+	// 每个线程执行threadRun函数，CPU/IO ThreadPool会自定义实现
     thread->handle = threadFactory_->newThread(
         std::bind(&ThreadPoolExecutor::threadRun, this, thread));
+
+	// 线程列表中增加线程wrapper
     threadList_.add(thread);
   }
+
+  // 线程wrapper中包含
+  // 1. thread对象
+  // 2. 信号量
+  // 这里的作用是等待n个线程都创建完毕(每个线程在进入threadRun时会post自己的信号量)
   for (auto& thread : newThreads) {
     thread->startupBaton.wait();
   }
+
+  // 添加观察者
   for (auto& o : observers_) {
     for (auto& thread : newThreads) {
       o->threadStarted(thread.get());
@@ -210,6 +270,7 @@ void ThreadPoolExecutor::removeThreads(size_t n, bool isJoin) {
   stopThreads(n);
 }
 
+// 已经停掉的线程保存在stoppedThreads_中，调用这个函数join掉
 void ThreadPoolExecutor::joinStoppedThreads(size_t n) {
   for (size_t i = 0; i < n; i++) {
     auto thread = stoppedThreads_.take();
@@ -222,13 +283,23 @@ void ThreadPoolExecutor::stop() {
   size_t n = 0;
   {
     SharedMutex::WriteHolder w{&threadListLock_};
-    maxThreads_.store(0, std::memory_order_release);
+	// 清零
+	maxThreads_.store(0, std::memory_order_release);
     activeThreads_.store(0, std::memory_order_release);
+
+	// 当前线程数
     n = threadList_.get().size();
+
+	// 移除n个线程，将其加入到stopThreads_中
     removeThreads(n, false);
+
+	// 需要join的线程数
     n += threadsToJoin_.load(std::memory_order_relaxed);
-    threadsToJoin_.store(0, std::memory_order_relaxed);
+
+	// 清零
+	threadsToJoin_.store(0, std::memory_order_relaxed);
   }
+  // join掉已经停止的线程
   joinStoppedThreads(n);
   CHECK_EQ(0, threadList_.get().size());
   CHECK_EQ(0, stoppedThreads_.size());
@@ -382,14 +453,19 @@ void ThreadPoolExecutor::removeObserver(std::shared_ptr<Observer> o) {
 
 // Idle threads may have destroyed themselves, attempt to join
 // them here
+
+// join掉退出的线程
 void ThreadPoolExecutor::ensureJoined() {
+  // 获取退出的线程数
   auto tojoin = threadsToJoin_.load(std::memory_order_relaxed);
   if (tojoin) {
     {
+      // 加锁，解决ABA问题
       SharedMutex::WriteHolder w{&threadListLock_};
       tojoin = threadsToJoin_.load(std::memory_order_relaxed);
       threadsToJoin_.store(0, std::memory_order_relaxed);
     }
+    // join掉一定数量的线程
     joinStoppedThreads(tojoin);
   }
 }
@@ -437,6 +513,8 @@ bool ThreadPoolExecutor::tryTimeoutThread() {
 // attempt to start a thread that handled the task, if we aren't already
 // running the maximum number of threads.
 void ThreadPoolExecutor::ensureActiveThreads() {
+
+  // join掉已经退出的线程
   ensureJoined();
 
   // Matches barrier in tryTimeoutThread().  Ensure task added
@@ -444,20 +522,27 @@ void ThreadPoolExecutor::ensureActiveThreads() {
   asymmetricLightBarrier();
 
   // Fast path assuming we are already at max threads.
+
+  // 获取当前线程数和最大允许的线程数
   auto active = activeThreads_.load(std::memory_order_relaxed);
   auto total = maxThreads_.load(std::memory_order_relaxed);
 
+  // 已经达到最大值，不能再创建线程了，退出
   if (active >= total) {
     return;
   }
 
   SharedMutex::WriteHolder w{&threadListLock_};
   // Double check behind lock.
+
+  // ABA问题
   active = activeThreads_.load(std::memory_order_relaxed);
   total = maxThreads_.load(std::memory_order_relaxed);
   if (active >= total) {
     return;
   }
+
+  // 增加一个线程
   ThreadPoolExecutor::addThreads(1);
   activeThreads_.store(active + 1, std::memory_order_relaxed);
 }
